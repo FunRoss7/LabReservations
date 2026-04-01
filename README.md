@@ -1,0 +1,1 @@
+An rpm that is meant to be installed on a jump box that uses ansible to ssh to lab machines via a group account, changes that password to something random, and sets a time at which that password will be reverted, and changes the login message to indicate who has the machine reserved. also allows the reserver to cancel the reservation or extend it
