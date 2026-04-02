@@ -1,0 +1,38 @@
+---
+# Called by: labreserve release <machine>
+# Also triggered automatically by the cron.d job at reservation expiry.
+#
+# What this does:
+#   1. Restore the shared account password to the vault default
+#   2. Clear /etc/motd
+
+- name: Release lab machine reservation
+  hosts: all
+  become: true
+  vars_files:
+    - "{{ lookup('env', 'LABRESERVE_HOME') | default('/etc/labreserve', true) }}/vault.yml"
+
+  tasks:
+    - name: Restore default password
+      ansible.builtin.user:
+        name: "{{ machines[inventory_hostname]['ansible_user'] }}"
+        password: "{{ machines[inventory_hostname]['default_password'] | password_hash('sha512') }}"
+        update_password: always
+      no_log: true
+
+    - name: Clear MOTD
+      ansible.builtin.copy:
+        dest: /etc/motd
+        content: ''
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Clear SSH pre-login banner (issue.net)
+      ansible.builtin.copy:
+        dest: /etc/issue.net
+        content: ''
+        owner: root
+        group: root
+        mode: '0644'
+      ignore_errors: true

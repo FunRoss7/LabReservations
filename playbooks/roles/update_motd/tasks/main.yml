@@ -1,0 +1,35 @@
+---
+# Update /etc/motd and /etc/issue.net with the reservation details.
+# Both files are cleared by the release playbook.
+
+- name: Write reservation MOTD
+  ansible.builtin.template:
+    src: motd.j2
+    dest: /etc/motd
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Write SSH pre-login banner (issue.net)
+  ansible.builtin.template:
+    src: motd.j2
+    dest: /etc/issue.net
+    owner: root
+    group: root
+    mode: '0644'
+
+# Ensure sshd is configured to show the banner before login.
+# This is a no-op if Banner is already set to /etc/issue.net.
+- name: Ensure sshd shows pre-login banner
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?Banner'
+    line: 'Banner /etc/issue.net'
+    state: present
+  notify: Reload sshd
+
+handlers:
+  - name: Reload sshd
+    ansible.builtin.service:
+      name: sshd
+      state: reloaded
