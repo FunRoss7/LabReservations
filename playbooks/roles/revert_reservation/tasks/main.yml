@@ -1,0 +1,44 @@
+---
+# Drop a self-contained revert script on the target machine and wire up two
+# cron entries to fire it:
+#
+#   labreserve-timed  — fires at the exact expiry time
+#   labreserve-reboot — fires on every boot; the script exits without doing
+#                       anything if the expiry hasn't passed yet, so reboots
+#                       before expiry are harmless.  If the machine was down
+#                       at the scheduled expiry time, this entry ensures the
+#                       revert runs as soon as it comes back up.
+#
+# Both cron entries and the script remove themselves when the revert runs.
+
+- name: Ensure labreserve lib directory exists on target
+  ansible.builtin.file:
+    path: /usr/local/lib/labreserve
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Deploy revert script
+  ansible.builtin.template:
+    src: revert.sh.j2
+    dest: /usr/local/lib/labreserve/revert.sh
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Deploy timed cron entry
+  ansible.builtin.template:
+    src: cron-timed.j2
+    dest: /etc/cron.d/labreserve-timed
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Deploy reboot cron entry
+  ansible.builtin.copy:
+    dest: /etc/cron.d/labreserve-reboot
+    content: "@reboot root /usr/local/lib/labreserve/revert.sh\n"
+    owner: root
+    group: root
+    mode: '0644'

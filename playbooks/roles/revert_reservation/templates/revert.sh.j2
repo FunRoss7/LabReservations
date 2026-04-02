@@ -1,0 +1,27 @@
+#!/bin/bash
+# labreserve revert script
+# Reserved by : {{ reserved_by }}
+# Expires     : {{ expires_at }}
+
+EXPIRY="{{ expires_at }}"
+ORIGINAL_HASH='{{ original_hash_result.stdout }}'
+USER="{{ ansible_user }}"
+
+# Guard for the @reboot case: if the machine reboots before the reservation
+# expires, exit cleanly — the timed cron entry will handle it on schedule.
+now=$(date +%Y-%m-%dT%H:%M)
+if [[ "$now" < "$EXPIRY" ]]; then
+    exit 0
+fi
+
+# Restore original password hash directly into /etc/shadow.
+usermod -p "$ORIGINAL_HASH" "$USER"
+
+# Clear login banners.
+printf '' > /etc/motd
+printf '' > /etc/issue.net
+
+# Remove both cron entries and this script.
+rm -f /etc/cron.d/labreserve-timed
+rm -f /etc/cron.d/labreserve-reboot
+rm -f -- "$0"

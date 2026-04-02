@@ -7,52 +7,50 @@ License:        MIT
 Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
-BuildRequires:  python3-devel
-BuildRequires:  python3-setuptools
 
-Requires:       python3 >= 3.6.8
-Requires:       python3-click >= 7.0
-Requires:       python3-PyYAML >= 5.1
+Requires:       bash
+Requires:       openssl
+Requires:       sqlite
 Requires:       ansible >= 2.16.3
 Requires:       cronie
 
 %description
-labreserve manages time-limited reservations of shared lab machines.
-It uses Ansible to rotate the shared account password on the target
-machine, updates the login banner, and schedules automatic reversion
-via a cron.d entry on the jump box.
+labreserve manages time-limited reservations of shared lab machines via a
+jump box.  When a user reserves a machine, the shared account password is
+changed to one they choose.  A self-contained revert script and two cron
+entries (timed + @reboot) are dropped on the target machine — no jump-box
+cron entries are needed.  If the machine is down at expiry, the revert runs
+automatically on next boot.
+
+Each user stores one reservation password in an openssl-encrypted profile
+under ~/.labreserve/.  The only system-level setup required is an ansible
+inventory at /etc/labreserve/hosts.yml.
 
 %prep
 %autosetup
 
-%build
-%py3_build
-
 %install
-%py3_install
+install -Dm 0755 bin/labreserve %{buildroot}%{_bindir}/labreserve
 
-# Install playbooks to /usr/share/labreserve/playbooks
 install -d %{buildroot}/usr/share/labreserve
 cp -r playbooks %{buildroot}/usr/share/labreserve/
 
-# Install example inventory
 install -d %{buildroot}/usr/share/labreserve/examples
-install -m 0644 inventory/hosts.yml.example %{buildroot}/usr/share/labreserve/examples/
+install -m 0644 inventory/hosts.yml.example \
+    %{buildroot}/usr/share/labreserve/examples/
 
-# Runtime config directory (empty; populated by labreserve init)
 install -d %{buildroot}/etc/labreserve
 
 %files
 %license LICENSE
-%{python3_sitelib}/labreserve/
-%{python3_sitelib}/labreserve-*.egg-info/
 %{_bindir}/labreserve
 /usr/share/labreserve/playbooks/
 /usr/share/labreserve/examples/
 %dir /etc/labreserve
 
 %post
-echo "Run 'labreserve init' as root to configure the vault and add machines."
+echo "Copy /usr/share/labreserve/examples/hosts.yml.example to /etc/labreserve/hosts.yml and populate it."
+echo "Users run 'labreserve passwd' once to set up their reservation password."
 
 %changelog
 * Wed Apr 02 2026 Ross Carlson <ross@example.com> - 0.1.0-1

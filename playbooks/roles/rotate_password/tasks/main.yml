@@ -1,12 +1,10 @@
 ---
-# Set the shared account password to the random_password variable supplied
-# by the CLI via a temp vars file (-e @file).  The CLI is responsible for
-# generating the password so it can store it in the user's personal vault
-# and display it — without it ever appearing in a process listing.
+# Set the shared account password to reservation_password, supplied by the
+# CLI via a temp vars file (-e @file) so it never appears in the process list.
 
-- name: Set random password on shared account
+- name: Set reservation password on shared account
   ansible.builtin.user:
-    name: "{{ machines[inventory_hostname]['ansible_user'] }}"
-    password: "{{ random_password | password_hash('sha512') }}"
+    name: "{{ ansible_user }}"
+    password: "{{ reservation_password | password_hash('sha512') }}"
     update_password: always
   no_log: true

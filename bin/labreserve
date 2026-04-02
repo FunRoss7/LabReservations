@@ -1,0 +1,454 @@
+#!/bin/bash
+set -euo pipefail
+
+###############################################################################
+# Configuration
+###############################################################################
+
+LABRESERVE_HOME="${LABRESERVE_HOME:-/etc/labreserve}"
+DB_PATH="$LABRESERVE_HOME/reservations.db"
+INVENTORY_PATH="${LABRESERVE_INVENTORY:-$LABRESERVE_HOME/hosts.yml}"
+PLAYBOOK_DIR="/usr/share/labreserve/playbooks"
+
+PROFILE_KEY_FILE="profile.key"
+PROFILE_ENC_FILE="profile.enc"
+
+###############################################################################
+# User helpers
+###############################################################################
+
+get_username() {
+    echo "${SUDO_USER:-$(id -un)}"
+}
+
+get_user_dir() {
+    local username="${1:-$(get_username)}"
+    local home_dir
+    home_dir=$(getent passwd "$username" | cut -d: -f6)
+    echo "$home_dir/.labreserve"
+}
+
+# If running as root via sudo, fix ownership of a file/dir to the real user.
+fix_ownership() {
+    if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        chown "$SUDO_USER:" "$1"
+    fi
+}
+
+###############################################################################
+# Profile — openssl AES-256-CBC with a per-user random key
+###############################################################################
+
+is_initialized() {
+    local user_dir="$1"
+    [[ -f "$user_dir/$PROFILE_KEY_FILE" ]]
+}
+
+init_profile() {
+    local user_dir="$1" password="$2"
+
+    mkdir -p "$user_dir"
+    chmod 700 "$user_dir"
+    fix_ownership "$user_dir"
+
+    openssl rand -base64 32 > "$user_dir/$PROFILE_KEY_FILE"
+    chmod 600 "$user_dir/$PROFILE_KEY_FILE"
+    fix_ownership "$user_dir/$PROFILE_KEY_FILE"
+
+    _encrypt_password "$user_dir" "$password"
+}
+
+get_reservation_password() {
+    local user_dir="$1"
+    openssl enc -d -aes-256-cbc -pbkdf2 \
+        -pass "file:$user_dir/$PROFILE_KEY_FILE" \
+        -in "$user_dir/$PROFILE_ENC_FILE"
+}
+
+set_reservation_password() {
+    local user_dir="$1" password="$2"
+    _encrypt_password "$user_dir" "$password"
+}
+
+_encrypt_password() {
+    local user_dir="$1" password="$2"
+    printf '%s' "$password" \
+        | openssl enc -aes-256-cbc -pbkdf2 \
+            -pass "file:$user_dir/$PROFILE_KEY_FILE" \
+            -out "$user_dir/$PROFILE_ENC_FILE"
+    chmod 600 "$user_dir/$PROFILE_ENC_FILE"
+    fix_ownership "$user_dir/$PROFILE_ENC_FILE"
+}
+
+###############################################################################
+# Database helpers
+###############################################################################
+
+_db() { sqlite3 "$DB_PATH" "$1"; }
+
+_q() {
+    # Escape a value for use in a single-quoted SQL string literal.
+    echo "${1//\'/\'\'}"
+}
+
+init_db() {
+    _db "CREATE TABLE IF NOT EXISTS reservations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        machine     TEXT NOT NULL,
+        reserved_by TEXT NOT NULL,
+        reserved_at TEXT NOT NULL,
+        expires_at  TEXT NOT NULL,
+        released_at TEXT,
+        status      TEXT NOT NULL DEFAULT 'active'
+    );"
+}
+
+_expire_stale() {
+    [[ -f "$DB_PATH" ]] || return 0
+    local now
+    now=$(date +%Y-%m-%dT%H:%M:%S)
+    _db "UPDATE reservations SET status='expired'
+         WHERE status='active' AND expires_at < '$now';"
+}
+
+get_active_reservation() {
+    [[ -f "$DB_PATH" ]] || return 0
+    _expire_stale
+    sqlite3 -separator $'\t' "$DB_PATH" \
+        "SELECT machine, reserved_by, reserved_at, expires_at
+         FROM reservations
+         WHERE machine='$(_q "$1")' AND status='active'
+         ORDER BY reserved_at DESC LIMIT 1;"
+}
+
+record_reservation() {
+    local machine="$1" reserved_by="$2" expires_at="$3"
+    local now; now=$(date +%Y-%m-%dT%H:%M:%S)
+    init_db
+    _db "INSERT INTO reservations (machine, reserved_by, reserved_at, expires_at)
+         VALUES ('$(_q "$machine")', '$(_q "$reserved_by")', '$now', '$(_q "$expires_at")');"
+}
+
+record_release() {
+    local now; now=$(date +%Y-%m-%dT%H:%M:%S)
+    _db "UPDATE reservations SET status='released', released_at='$now'
+         WHERE machine='$(_q "$1")' AND status='active';"
+}
+
+get_active_by_user() {
+    [[ -f "$DB_PATH" ]] || return 0
+    _expire_stale
+    sqlite3 -separator $'\t' "$DB_PATH" \
+        "SELECT machine, expires_at FROM reservations
+         WHERE reserved_by='$(_q "$1")' AND status='active'
+         ORDER BY expires_at;"
+}
+
+list_reservations() {
+    [[ -f "$DB_PATH" ]] || return 0
+    _expire_stale
+    local where=""
+    [[ "${1:-}" == "--active" ]] && where="WHERE status='active'"
+    sqlite3 -separator $'\t' "$DB_PATH" \
+        "SELECT machine, reserved_by, status, reserved_at, expires_at
+         FROM reservations $where
+         ORDER BY $([ "${1:-}" == "--active" ] && echo expires_at || echo "reserved_at DESC");"
+}
+
+###############################################################################
+# Ansible helpers
+###############################################################################
+
+# Build a temp JSON vars file from key/value pairs.
+# Passwords go here rather than in argv so they stay out of the process list.
+make_vars_file() {
+    local tmpfile
+    tmpfile=$(mktemp /tmp/labreserve-XXXXXX.json)
+    chmod 600 "$tmpfile"
+
+    local json="{" first=true
+    while [[ $# -ge 2 ]]; do
+        local key="$1" val="$2"; shift 2
+        # Minimal JSON string escaping: backslash and double-quote.
+        val="${val//\\/\\\\}"; val="${val//\"/\\\"}"
+        $first || json+=","
+        json+="\"$key\":\"$val\""
+        first=false
+    done
+    printf '%s' "$json}" > "$tmpfile"
+    echo "$tmpfile"
+}
+
+run_playbook() {
+    local playbook="$1" machines="$2"
+    local vars_file="${3:-}" ask_pass="${4:-false}" vault_file="${5:-}"
+
+    local cmd=(
+        ansible-playbook
+        -i "$INVENTORY_PATH"
+        --limit "$machines"
+        "$PLAYBOOK_DIR/$playbook"
+    )
+    [[ -n "$vars_file" ]]  && cmd+=(-e "@$vars_file")
+    [[ "$ask_pass" == true ]] && cmd+=(--ask-pass)
+    [[ -n "$vault_file" ]] && cmd+=(-e "@$vault_file")
+
+    "${cmd[@]}"
+}
+
+###############################################################################
+# Duration / expiry parsing
+###############################################################################
+
+parse_duration() {
+    local s="$1" hours=0 minutes=0
+    if    [[ "$s" =~ ^([0-9]+)h([0-9]+)m$ ]]; then hours="${BASH_REMATCH[1]}"; minutes="${BASH_REMATCH[2]}"
+    elif  [[ "$s" =~ ^([0-9]+)h$ ]];          then hours="${BASH_REMATCH[1]}"
+    elif  [[ "$s" =~ ^([0-9]+)m$ ]];          then minutes="${BASH_REMATCH[1]}"
+    else  echo "Invalid duration '$s'. Use formats like '2h', '30m', '1h30m'." >&2; return 1
+    fi
+    date -d "+${hours} hours +${minutes} minutes" +%Y-%m-%dT%H:%M
+}
+
+###############################################################################
+# passwd command
+###############################################################################
+
+cmd_passwd() {
+    local username user_dir
+    username=$(get_username)
+    user_dir=$(get_user_dir "$username")
+
+    local active
+    active=$(get_active_by_user "$username")
+    if [[ -n "$active" ]]; then
+        echo "You have active reservations. Release them before changing your password:"
+        while IFS=$'\t' read -r machine expires_at; do
+            echo "  $machine (expires $expires_at)"
+        done <<< "$active"
+        exit 1
+    fi
+
+    if is_initialized "$user_dir"; then
+        echo "Current reservation password: $(get_reservation_password "$user_dir")"
+        echo
+    fi
+
+    local password confirm
+    read -rsp "New reservation password: " password; echo
+    read -rsp "Confirm: " confirm; echo
+    [[ "$password" == "$confirm" ]] || { echo "Passwords do not match." >&2; exit 1; }
+    [[ -n "$password" ]] || { echo "Password cannot be empty." >&2; exit 1; }
+
+    if is_initialized "$user_dir"; then
+        set_reservation_password "$user_dir" "$password"
+    else
+        init_profile "$user_dir" "$password"
+    fi
+
+    echo "Reservation password saved to $user_dir"
+}
+
+###############################################################################
+# reserve command
+###############################################################################
+
+cmd_reserve() {
+    local duration="" until="" ask_pass=false vault_file=""
+    local -a machines=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--duration)   duration="$2";    shift 2 ;;
+            -u|--until)      until="$2";       shift 2 ;;
+            --ask-pass)      ask_pass=true;    shift   ;;
+            --vault-file)    vault_file="$2";  shift 2 ;;
+            -*)  echo "Unknown option: $1" >&2; exit 1  ;;
+            *)   machines+=("$1");             shift   ;;
+        esac
+    done
+
+    [[ ${#machines[@]} -gt 0 ]] \
+        || { echo "Usage: labreserve reserve <machine> [...] --duration <d> | --until <datetime>" >&2; exit 1; }
+    [[ -z "$duration" || -z "$until" ]] \
+        || { echo "Specify either --duration or --until, not both." >&2; exit 1; }
+    [[ -n "$duration" || -n "$until" ]] \
+        || { echo "Provide --duration or --until." >&2; exit 1; }
+
+    local expires_at
+    expires_at=$( [[ -n "$duration" ]] && parse_duration "$duration" || echo "$until" )
+
+    local username user_dir
+    username=$(get_username)
+    user_dir=$(get_user_dir "$username")
+
+    if ! is_initialized "$user_dir"; then
+        echo "No reservation password found — let's set one up first."
+        cmd_passwd
+    fi
+
+    local reservation_password
+    reservation_password=$(get_reservation_password "$user_dir")
+
+    # Conflict check
+    local -a conflicts=()
+    for machine in "${machines[@]}"; do
+        local existing
+        existing=$(get_active_reservation "$machine")
+        [[ -z "$existing" ]] || conflicts+=("$machine")
+    done
+
+    if [[ ${#conflicts[@]} -gt 0 ]]; then
+        echo "Already reserved: ${conflicts[*]}"
+        read -rp "Override? [y/N] " yn
+        [[ "$yn" =~ ^[Yy]$ ]] || exit 0
+    fi
+
+    echo
+    echo "Reservation summary:"
+    echo "  Machines:    ${machines[*]}"
+    echo "  Reserved by: $username"
+    echo "  Expires at:  $expires_at"
+    read -rp $'\nProceed? [y/N] ' yn
+    [[ "$yn" =~ ^[Yy]$ ]] || exit 0
+
+    local -a failed=()
+    for machine in "${machines[@]}"; do
+        echo
+        echo "[$machine] Running reservation playbook..."
+
+        local vars_file
+        vars_file=$(make_vars_file \
+            reservation_password "$reservation_password" \
+            reserved_by          "$username" \
+            expires_at           "$expires_at")
+
+        if run_playbook reserve.yml "$machine" "$vars_file" "$ask_pass" "$vault_file"; then
+            record_reservation "$machine" "$username" "$expires_at"
+            echo "[$machine] Reserved until $expires_at."
+        else
+            echo "[$machine] Playbook failed — not recorded." >&2
+            failed+=("$machine")
+        fi
+
+        rm -f "$vars_file"
+    done
+
+    [[ ${#failed[@]} -eq 0 ]] || exit 1
+}
+
+###############################################################################
+# release command
+###############################################################################
+
+cmd_release() {
+    local -a machines=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*) echo "Unknown option: $1" >&2; exit 1 ;;
+            *)  machines+=("$1"); shift ;;
+        esac
+    done
+
+    [[ ${#machines[@]} -gt 0 ]] \
+        || { echo "Usage: labreserve release <machine> [...]" >&2; exit 1; }
+
+    local username user_dir
+    username=$(get_username)
+    user_dir=$(get_user_dir "$username")
+
+    local -a to_release=()
+    for machine in "${machines[@]}"; do
+        if [[ -z "$(get_active_reservation "$machine")" ]]; then
+            echo "$machine: no active reservation, skipping."
+        else
+            to_release+=("$machine")
+        fi
+    done
+
+    [[ ${#to_release[@]} -gt 0 ]] || return 0
+
+    echo "Releasing: ${to_release[*]}"
+    read -rp $'\nProceed? [y/N] ' yn
+    [[ "$yn" =~ ^[Yy]$ ]] || exit 0
+
+    is_initialized "$user_dir" \
+        || { echo "No reservation profile found — cannot retrieve SSH password." >&2; exit 1; }
+
+    local reservation_password
+    reservation_password=$(get_reservation_password "$user_dir")
+
+    local -a failed=()
+    for machine in "${to_release[@]}"; do
+        echo
+        echo "[$machine] Running release playbook..."
+
+        local vars_file
+        vars_file=$(make_vars_file ansible_password "$reservation_password")
+
+        if run_playbook release.yml "$machine" "$vars_file"; then
+            record_release "$machine"
+            echo "[$machine] Released."
+        else
+            echo "[$machine] Playbook failed — not cleared." >&2
+            failed+=("$machine")
+        fi
+
+        rm -f "$vars_file"
+    done
+
+    [[ ${#failed[@]} -eq 0 ]] || exit 1
+}
+
+###############################################################################
+# status command
+###############################################################################
+
+cmd_status() {
+    local active_only=true
+    [[ "${1:-}" == "--all" ]] && active_only=false
+
+    local rows
+    rows=$(list_reservations $( $active_only && echo "--active" || true ))
+
+    if [[ -z "$rows" ]]; then
+        echo "No reservations found."
+        return
+    fi
+
+    printf '%-22s %-16s %-10s %-20s %-20s\n' \
+        Machine "Reserved By" Status "Reserved At" "Expires At"
+    printf -- '-%.0s' {1..90}; echo
+
+    while IFS=$'\t' read -r machine reserved_by status reserved_at expires_at; do
+        printf '%-22s %-16s %-10s %-20s %-20s\n' \
+            "$machine" "$reserved_by" "${status^^}" \
+            "${reserved_at:0:16}" "${expires_at:0:16}"
+    done <<< "$rows"
+}
+
+###############################################################################
+# Entry point
+###############################################################################
+
+usage() {
+    cat <<'EOF'
+Usage: labreserve <command> [options]
+
+  reserve <machine> [...]  --duration <d> | --until <YYYY-MM-DDTHH:MM>
+                           [--ask-pass] [--vault-file <file>]
+  release <machine> [...]
+  passwd
+  status  [--all]
+EOF
+}
+
+case "${1:-}" in
+    reserve) shift; cmd_reserve "$@" ;;
+    release) shift; cmd_release "$@" ;;
+    passwd)  cmd_passwd ;;
+    status)  shift; cmd_status "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) echo "Unknown command: $1" >&2; usage >&2; exit 1 ;;
+esac

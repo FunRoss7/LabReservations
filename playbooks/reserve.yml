@@ -1,48 +1,26 @@
 ---
-# Called by: labreserve reserve <machine> --duration <d>
-# Extra vars passed in:  reserved_by, expires_at (ISO8601)
+# Invoked by: labreserve reserve
 #
-# What this does:
-#   1. Abort if the machine is already reserved (non-standard password in place)
-#   2. Generate a random password and set it on the shared account
-#   3. Update /etc/motd with the reservation details
+# Extra vars supplied via temp file (-e @file):
+#   reservation_password  — the user's chosen password to set on the shared account
+#   reserved_by           — username of the person reserving
+#   expires_at            — ISO8601 expiry timestamp (YYYY-MM-DDTHH:MM)
+#
+# SSH connection: the user either passes --ask-pass (ansible prompts) or
+# supplies credentials via their own vault file.  No system vault is used.
 
 - name: Reserve lab machine
   hosts: all
   become: true
-  vars_files:
-    - "{{ lookup('env', 'LABRESERVE_HOME') | default('/etc/labreserve', true) }}/vault.yml"
 
   pre_tasks:
-    - name: Check whether machine is already reserved
-      ansible.builtin.shell: |
-        id_output=$(id -u {{ machines[inventory_hostname]['ansible_user'] }} 2>&1)
-        # Try logging in with the default password via a local passwd check
-        # We detect reservation by testing the current password against the vault default
-        echo "{{ machines[inventory_hostname]['default_password'] }}" | \
-          python3 -c "
-        import crypt, sys, spwd
-        pw = sys.stdin.read().strip()
-        try:
-            shadow = spwd.getspnam('{{ machines[inventory_hostname]['ansible_user'] }}')
-            hashed = crypt.crypt(pw, shadow.sp_pwdp)
-            sys.exit(0 if hashed == shadow.sp_pwdp else 1)
-        except PermissionError:
-            sys.exit(0)  # can't read shadow without root; assume not reserved
-        "
-      register: default_pw_check
+    - name: Read current password hash before we change anything
+      ansible.builtin.shell: "getent shadow {{ ansible_user }} | cut -d: -f2"
+      register: original_hash_result
       changed_when: false
-      failed_when: false
       no_log: true
-
-    - name: Abort if machine appears already reserved
-      ansible.builtin.fail:
-        msg: >
-          {{ inventory_hostname }} already has a non-default password in place,
-          which usually means it is already reserved. Release it first, or pass
-          --override to the labreserve CLI.
-      when: default_pw_check.rc != 0
 
   roles:
     - rotate_password
     - update_motd
+    - revert_reservation
