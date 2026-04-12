@@ -81,7 +81,7 @@ past-expiry active entries as `expired` so the DB stays consistent.
 | `bash` | Any version shipped with RHEL 8 |
 | `openssl` | For profile encryption |
 | `sqlite3` | For the shared reservation DB |
-| `ansible >= 2.16.3` | For running playbooks against target machines |
+| `ansible-core` | For running playbooks against target machines (available in Rocky/RHEL 9 AppStream; use EPEL on RHEL 8) |
 
 ### Target machines
 

@@ -11,7 +11,7 @@ BuildArch:      noarch
 Requires:       bash
 Requires:       openssl
 Requires:       sqlite
-Requires:       ansible >= 2.16.3
+Requires:       ansible-core
 Requires:       cronie
 
 %description
