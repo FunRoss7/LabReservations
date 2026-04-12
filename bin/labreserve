@@ -10,6 +10,12 @@ DB_PATH="$LABRESERVE_HOME/reservations.db"
 INVENTORY_PATH="${LABRESERVE_INVENTORY:-$LABRESERVE_HOME/hosts.yml}"
 PLAYBOOK_DIR="/usr/share/labreserve/playbooks"
 
+# Optional: set to the hostname/IP of this jump box so that the cancel script
+# dropped on target machines can SSH back to update the reservation database
+# immediately when a reservation is cancelled from the target.
+# If unset, the cancel script prints manual-release instructions instead.
+LABRESERVE_JUMP_BOX="${LABRESERVE_JUMP_BOX:-}"
+
 PROFILE_KEY_FILE="profile.key"
 PROFILE_ENC_FILE="profile.enc"
 
@@ -321,7 +327,8 @@ cmd_reserve() {
         vars_file=$(make_vars_file \
             reservation_password "$reservation_password" \
             reserved_by          "$username" \
-            expires_at           "$expires_at")
+            expires_at           "$expires_at" \
+            labreserve_jump_box  "$LABRESERVE_JUMP_BOX")
 
         if run_playbook reserve.yml "$machine" "$vars_file" "$ask_pass" "$vault_file"; then
             record_reservation "$machine" "$username" "$expires_at"

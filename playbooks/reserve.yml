@@ -5,6 +5,8 @@
 #   reservation_password  — the user's chosen password to set on the shared account
 #   reserved_by           — username of the person reserving
 #   expires_at            — ISO8601 expiry timestamp (YYYY-MM-DDTHH:MM)
+#   labreserve_jump_box   — (optional) hostname/IP of the jump box, templated into
+#                           the cancel script for remote DB updates
 #
 # SSH connection: the user either passes --ask-pass (ansible prompts) or
 # supplies credentials via their own vault file.  No system vault is used.
@@ -19,6 +21,75 @@
       register: original_hash_result
       changed_when: false
       no_log: true
+
+    - name: Read current /etc/motd before reservation
+      ansible.builtin.slurp:
+        src: /etc/motd
+      register: _current_motd_raw
+      ignore_errors: true
+
+    - name: Read current /etc/issue.net before reservation
+      ansible.builtin.slurp:
+        src: /etc/issue.net
+      register: _current_issue_net_raw
+      ignore_errors: true
+
+    - name: Discover alternate OS roots
+      ansible.builtin.include_tasks: tasks/discover_alt_roots.yml
+
+    - name: Read original shadow hash from each alternate root
+      ansible.builtin.shell: >-
+        grep "^{{ ansible_user }}:" {{ item }}/etc/shadow | cut -d: -f2
+      loop: "{{ alt_roots }}"
+      register: _alt_hash_results
+      no_log: true
+      changed_when: false
+
+    - name: Read original /etc/motd from alternate roots with a unique motd device
+      ansible.builtin.slurp:
+        src: "{{ item }}/etc/motd"
+      loop: "{{ alt_roots_unique_motd }}"
+      register: _alt_motd_results
+      ignore_errors: true
+
+    - name: Read original /etc/issue.net from alternate roots with a unique motd device
+      ansible.builtin.slurp:
+        src: "{{ item }}/etc/issue.net"
+      loop: "{{ alt_roots_unique_motd }}"
+      register: _alt_issue_net_results
+      ignore_errors: true
+
+    - name: Build per-root info list for alternate OS roots
+      # Each entry carries everything the roles need: the original hash for that
+      # root's shadow, the original motd/issue.net content (either its own if
+      # it has a unique motd device, or the current OS's if shared), and a flag
+      # controlling whether this root needs an independent motd write.
+      ansible.builtin.set_fact:
+        alt_root_info: >-
+          {%- set cur_motd = _current_motd_raw.get('content', '') | b64decode -%}
+          {%- set cur_issue = _current_issue_net_raw.get('content', '') | b64decode -%}
+          {%- set result = [] -%}
+          {%- for i in range(alt_roots | length) -%}
+            {%- set root = alt_roots[i] -%}
+            {%- set hash = _alt_hash_results.results[i].stdout | default('') -%}
+            {%- set needs_motd = root in alt_roots_unique_motd -%}
+            {%- if needs_motd -%}
+              {%- set mi = alt_roots_unique_motd.index(root) -%}
+              {%- set motd = _alt_motd_results.results[mi].get('content', '') | b64decode -%}
+              {%- set issue = _alt_issue_net_results.results[mi].get('content', '') | b64decode -%}
+            {%- else -%}
+              {%- set motd = cur_motd -%}
+              {%- set issue = cur_issue -%}
+            {%- endif -%}
+            {%- set _ = result.append({
+                  'root': root,
+                  'original_hash': hash,
+                  'needs_motd': needs_motd,
+                  'original_motd': motd,
+                  'original_issue_net': issue
+               }) -%}
+          {%- endfor -%}
+          {{ result }}
 
   roles:
     - rotate_password

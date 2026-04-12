@@ -1,0 +1,69 @@
+---
+# Discover alternate OS roots on dual-boot machines.
+#
+# A candidate alternate root is any top-level mount point (e.g. /mnt/op2) that
+# contains an /etc/shadow whose underlying device differs from the running OS.
+# This correctly excludes bind-mounts and diamond-mounted shared partitions.
+#
+# Sets facts:
+#   alt_roots             — list of mount-point paths that are other OS roots
+#   alt_roots_unique_motd — subset of alt_roots whose /etc/motd lives on a
+#                           device not already covered by the current OS or an
+#                           earlier entry (handles shared /opt-style partitions)
+
+- name: Collect top-level mount points as candidate alternate roots
+  ansible.builtin.set_fact:
+    _candidate_roots: >-
+      {{ ansible_mounts
+         | selectattr('mount', 'match', '^/[^/]+$')
+         | map(attribute='mount')
+         | list }}
+
+- name: Stat current /etc/shadow to establish reference device
+  ansible.builtin.stat:
+    path: /etc/shadow
+  register: _current_shadow_stat
+
+- name: Stat /etc/shadow in each candidate root
+  ansible.builtin.stat:
+    path: "{{ item }}/etc/shadow"
+  loop: "{{ _candidate_roots }}"
+  register: _alt_shadow_stats
+
+- name: Identify alternate OS roots
+  ansible.builtin.set_fact:
+    alt_roots: >-
+      {{ _alt_shadow_stats.results
+         | selectattr('stat.exists', 'equalto', true)
+         | selectattr('stat.dev', 'ne', _current_shadow_stat.stat.dev)
+         | map(attribute='item')
+         | list }}
+
+- name: Stat current /etc/motd to establish reference device
+  ansible.builtin.stat:
+    path: /etc/motd
+  register: _current_motd_stat
+
+- name: Stat /etc/motd in each alternate root
+  ansible.builtin.stat:
+    path: "{{ item }}/etc/motd"
+  loop: "{{ alt_roots }}"
+  register: _alt_motd_stats
+
+- name: Identify alternate roots with a unique /etc/motd device
+  # Iterates in order, tracking seen device numbers. An alt root is included
+  # only if its motd lives on a device not yet seen (current OS or prior alt
+  # roots). This handles diamond mounts where two OS roots share one /opt
+  # partition — only the first root wins the motd write; the second is skipped
+  # because the file is already covered.
+  ansible.builtin.set_fact:
+    alt_roots_unique_motd: >-
+      {%- set seen = [_current_motd_stat.stat.dev] -%}
+      {%- set out = [] -%}
+      {%- for r in _alt_motd_stats.results -%}
+        {%- if r.stat.exists and r.stat.dev not in seen -%}
+          {%- set _ = out.append(r.item) -%}
+          {%- set _ = seen.append(r.stat.dev) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}

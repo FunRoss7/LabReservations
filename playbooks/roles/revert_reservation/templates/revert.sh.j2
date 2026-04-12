@@ -2,10 +2,14 @@
 # labreserve revert script
 # Reserved by : {{ reserved_by }}
 # Expires     : {{ expires_at }}
+#
+# Self-contained — all data needed to undo the reservation is either embedded
+# here (ORIGINAL_HASH) or stored alongside this script in LIB_DIR.
 
 EXPIRY="{{ expires_at }}"
-ORIGINAL_HASH='{{ original_hash_result.stdout }}'
+ORIGINAL_HASH='{{ original_hash }}'
 USER="{{ ansible_user }}"
+LIB_DIR="/usr/local/lib/labreserve"
 
 # Guard for the @reboot case: if the machine reboots before the reservation
 # expires, exit cleanly — the timed cron entry will handle it on schedule.
@@ -14,14 +18,15 @@ if [[ "$now" < "$EXPIRY" ]]; then
     exit 0
 fi
 
-# Restore original password hash directly into /etc/shadow.
+# Restore the original password hash directly into /etc/shadow.
 usermod -p "$ORIGINAL_HASH" "$USER"
 
-# Clear login banners.
-printf '' > /etc/motd
-printf '' > /etc/issue.net
+# Restore original login banners from the copies saved at reservation time.
+[[ -f "$LIB_DIR/original_motd" ]]      && cp "$LIB_DIR/original_motd"      /etc/motd
+[[ -f "$LIB_DIR/original_issue.net" ]] && cp "$LIB_DIR/original_issue.net" /etc/issue.net
 
-# Remove both cron entries and this script.
+# Remove cron entries, cancel script, lib directory (and everything in it).
 rm -f /etc/cron.d/labreserve-timed
 rm -f /etc/cron.d/labreserve-reboot
-rm -f -- "$0"
+rm -f /root/cancel_reservation
+rm -rf "$LIB_DIR"

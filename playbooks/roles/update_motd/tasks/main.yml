@@ -1,6 +1,10 @@
 ---
 # Update /etc/motd and /etc/issue.net with the reservation details.
-# Both files are cleared by the release playbook.
+#
+# For alternate OS roots, only roots whose motd lives on a distinct physical
+# partition are written (alt_roots_unique_motd). Roots that share a motd
+# partition with the current OS or an earlier alt root are skipped — the write
+# to the shared device already happened when the current OS was processed.
 
 - name: Write reservation MOTD
   ansible.builtin.template:
@@ -18,8 +22,6 @@
     group: root
     mode: '0644'
 
-# Ensure sshd is configured to show the banner before login.
-# This is a no-op if Banner is already set to /etc/issue.net.
 - name: Ensure sshd shows pre-login banner
   ansible.builtin.lineinfile:
     path: /etc/ssh/sshd_config
@@ -27,6 +29,24 @@
     line: 'Banner /etc/issue.net'
     state: present
   notify: Reload sshd
+
+- name: Write reservation MOTD to alternate OS roots
+  ansible.builtin.template:
+    src: motd.j2
+    dest: "{{ item }}/etc/motd"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ alt_roots_unique_motd | default([]) }}"
+
+- name: Write SSH pre-login banner to alternate OS roots
+  ansible.builtin.template:
+    src: motd.j2
+    dest: "{{ item }}/etc/issue.net"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ alt_roots_unique_motd | default([]) }}"
 
 handlers:
   - name: Reload sshd

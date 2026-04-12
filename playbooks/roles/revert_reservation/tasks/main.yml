@@ -9,9 +9,18 @@
 #                       at the scheduled expiry time, this entry ensures the
 #                       revert runs as soon as it comes back up.
 #
-# Both cron entries and the script remove themselves when the revert runs.
+# Everything above is deployed to the running OS root and to every discovered
+# alternate OS root.  Each root gets its own revert script carrying that root's
+# original password hash; original motd/issue.net content is stored as files
+# alongside the revert script so it can restore them accurately regardless of
+# per-OS differences (copyright lines, etc.).
+#
+# A cancel script is also dropped in /root/ on every root so that anyone with
+# physical/root access can override the reservation immediately.
 
-- name: Ensure labreserve lib directory exists on target
+# ── lib directories ──────────────────────────────────────────────────────────
+
+- name: Ensure labreserve lib directory exists (current OS)
   ansible.builtin.file:
     path: /usr/local/lib/labreserve
     state: directory
@@ -19,15 +28,77 @@
     group: root
     mode: '0700'
 
-- name: Deploy revert script
+- name: Ensure labreserve lib directory exists in alternate roots
+  ansible.builtin.file:
+    path: "{{ item.root }}/usr/local/lib/labreserve"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: "{{ alt_root_info | default([]) }}"
+
+# ── store original motd / issue.net ─────────────────────────────────────────
+
+- name: Store original /etc/motd for revert (current OS)
+  ansible.builtin.copy:
+    content: "{{ _current_motd_raw.get('content', '') | b64decode }}"
+    dest: /usr/local/lib/labreserve/original_motd
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Store original /etc/issue.net for revert (current OS)
+  ansible.builtin.copy:
+    content: "{{ _current_issue_net_raw.get('content', '') | b64decode }}"
+    dest: /usr/local/lib/labreserve/original_issue.net
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Store original /etc/motd for revert in alternate roots
+  ansible.builtin.copy:
+    content: "{{ item.original_motd }}"
+    dest: "{{ item.root }}/usr/local/lib/labreserve/original_motd"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ alt_root_info | default([]) }}"
+
+- name: Store original /etc/issue.net for revert in alternate roots
+  ansible.builtin.copy:
+    content: "{{ item.original_issue_net }}"
+    dest: "{{ item.root }}/usr/local/lib/labreserve/original_issue.net"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ alt_root_info | default([]) }}"
+
+# ── revert scripts ───────────────────────────────────────────────────────────
+
+- name: Deploy revert script (current OS)
   ansible.builtin.template:
     src: revert.sh.j2
     dest: /usr/local/lib/labreserve/revert.sh
     owner: root
     group: root
     mode: '0700'
+  vars:
+    original_hash: "{{ original_hash_result.stdout }}"
 
-- name: Deploy timed cron entry
+- name: Deploy revert script to alternate roots
+  ansible.builtin.template:
+    src: revert.sh.j2
+    dest: "{{ item.root }}/usr/local/lib/labreserve/revert.sh"
+    owner: root
+    group: root
+    mode: '0700'
+  vars:
+    original_hash: "{{ item.original_hash }}"
+  loop: "{{ alt_root_info | default([]) }}"
+
+# ── cron entries ─────────────────────────────────────────────────────────────
+
+- name: Deploy timed cron entry (current OS)
   ansible.builtin.template:
     src: cron-timed.j2
     dest: /etc/cron.d/labreserve-timed
@@ -35,10 +106,47 @@
     group: root
     mode: '0644'
 
-- name: Deploy reboot cron entry
+- name: Deploy timed cron entry to alternate roots
+  ansible.builtin.template:
+    src: cron-timed.j2
+    dest: "{{ item.root }}/etc/cron.d/labreserve-timed"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ alt_root_info | default([]) }}"
+
+- name: Deploy reboot cron entry (current OS)
   ansible.builtin.copy:
     dest: /etc/cron.d/labreserve-reboot
     content: "@reboot root /usr/local/lib/labreserve/revert.sh\n"
     owner: root
     group: root
     mode: '0644'
+
+- name: Deploy reboot cron entry to alternate roots
+  ansible.builtin.copy:
+    content: "@reboot root /usr/local/lib/labreserve/revert.sh\n"
+    dest: "{{ item.root }}/etc/cron.d/labreserve-reboot"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ alt_root_info | default([]) }}"
+
+# ── cancel scripts ───────────────────────────────────────────────────────────
+
+- name: Deploy cancel script (current OS)
+  ansible.builtin.template:
+    src: cancel_reservation.sh.j2
+    dest: /root/cancel_reservation
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Deploy cancel script to alternate roots
+  ansible.builtin.template:
+    src: cancel_reservation.sh.j2
+    dest: "{{ item.root }}/root/cancel_reservation"
+    owner: root
+    group: root
+    mode: '0700'
+  loop: "{{ alt_root_info | default([]) }}"

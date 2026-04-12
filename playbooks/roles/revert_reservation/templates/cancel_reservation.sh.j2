@@ -1,0 +1,51 @@
+#!/bin/bash
+# labreserve cancel script
+# Reserved by : {{ reserved_by }}
+# Expires     : {{ expires_at }}
+#
+# Run as root on the target machine to immediately cancel this reservation.
+# Calls the local revert script (restores password and login banners), then
+# attempts to notify the jump box so the reservation database is updated right
+# away rather than waiting for the natural expiry.
+
+MACHINE="{{ inventory_hostname }}"
+EXPIRY="{{ expires_at }}"
+JUMP_BOX="{{ labreserve_jump_box | default('') }}"
+JUMP_USER="{{ labreserve_jump_user | default('labreserve-agent') }}"
+DB_PATH="{{ labreserve_db_path | default('/etc/labreserve/reservations.db') }}"
+REVERT_SCRIPT="/usr/local/lib/labreserve/revert.sh"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root." >&2
+    exit 1
+fi
+
+echo "Cancelling reservation for $MACHINE (reserved by {{ reserved_by }}, expires $EXPIRY)..."
+
+if [[ ! -x "$REVERT_SCRIPT" ]]; then
+    echo "Revert script not found at $REVERT_SCRIPT — reservation may already be cancelled." >&2
+    exit 1
+fi
+
+# Run the local revert. This removes itself, the cron entries, and the lib dir.
+# This script's own file (/root/cancel_reservation) is also removed by revert.sh,
+# but the running process continues normally until it exits.
+"$REVERT_SCRIPT"
+
+# Attempt to update the remote reservation database on the jump box.
+if [[ -n "$JUMP_BOX" ]]; then
+    NOW=$(date +%Y-%m-%dT%H:%M:%S)
+    SQL="UPDATE reservations SET status='released', released_at='$NOW' WHERE machine='$MACHINE' AND status='active';"
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$JUMP_USER@$JUMP_BOX" \
+           "sqlite3 '$DB_PATH' \"$SQL\"" 2>/dev/null; then
+        echo "Remote reservation database updated."
+    else
+        echo "Could not reach jump box — reservation will show as expired after $EXPIRY."
+        echo "To release manually, run on the jump box:  labreserve release $MACHINE"
+    fi
+else
+    echo "Jump box not configured in this script."
+    echo "To release manually, run on the jump box:  labreserve release $MACHINE"
+fi
+
+echo "Done."

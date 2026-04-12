@@ -1,10 +1,45 @@
 ---
 # Set the shared account password to reservation_password, supplied by the
 # CLI via a temp vars file (-e @file) so it never appears in the process list.
+#
+# After changing the running OS, the resulting hash is read back from shadow
+# and applied to each discovered alternate OS root's shadow file directly.
+# Python is used (via env vars) to avoid shell interpolation of the $ characters
+# present in crypt hashes.
 
 - name: Set reservation password on shared account
   ansible.builtin.user:
     name: "{{ ansible_user }}"
     password: "{{ reservation_password | password_hash('sha512') }}"
     update_password: always
+  no_log: true
+
+- name: Read new password hash from shadow
+  ansible.builtin.shell: "getent shadow {{ ansible_user }} | cut -d: -f2"
+  register: _new_hash_result
+  changed_when: false
+  no_log: true
+
+- name: Apply new password hash to alternate OS root shadow files
+  ansible.builtin.shell: |
+    python3 -c "
+    import os
+    path  = os.environ['SHADOW_PATH']
+    user  = os.environ['SHADOW_USER']
+    nhash = os.environ['NEW_HASH']
+    with open(path) as f:
+        lines = f.readlines()
+    with open(path, 'w') as f:
+        for line in lines:
+            if line.startswith(user + ':'):
+                parts = line.split(':')
+                parts[1] = nhash
+                line = ':'.join(parts)
+            f.write(line)
+    "
+  environment:
+    SHADOW_PATH: "{{ item.root }}/etc/shadow"
+    SHADOW_USER: "{{ ansible_user }}"
+    NEW_HASH: "{{ _new_hash_result.stdout }}"
+  loop: "{{ alt_root_info | default([]) }}"
   no_log: true

@@ -5,15 +5,23 @@
 #   ansible_password  — the reservation password (used to SSH into the target,
 #                       which currently has that password set)
 #
-# The original password hash was embedded in the revert script when the
-# reservation was made.  We read it back from there and restore it directly
-# into /etc/shadow via usermod -p, bypassing any need to know the plaintext.
+# The original password hash for each OS root was embedded in that root's
+# revert script at reservation time.  We read it back and restore it directly
+# into each shadow file, bypassing any need to know the plaintext.
+#
+# Original motd / issue.net content was stored as files in the labreserve lib
+# directory on each root at reservation time; we copy them back into place.
 
 - name: Release lab machine reservation
   hosts: all
   become: true
 
   tasks:
+    - name: Discover alternate OS roots
+      ansible.builtin.include_tasks: tasks/discover_alt_roots.yml
+
+    # ── current OS restore ───────────────────────────────────────────────────
+
     - name: Read original password hash from revert script
       ansible.builtin.shell: |
         grep "^ORIGINAL_HASH=" /usr/local/lib/labreserve/revert.sh \
@@ -26,34 +34,128 @@
       ansible.builtin.shell: "usermod -p '{{ original_hash.stdout }}' {{ ansible_user }}"
       no_log: true
 
-    - name: Clear MOTD
+    - name: Restore original /etc/motd
       ansible.builtin.copy:
+        src: /usr/local/lib/labreserve/original_motd
         dest: /etc/motd
-        content: "\n"
-        owner: root
-        group: root
-        mode: '0644'
-
-    - name: Clear SSH pre-login banner
-      ansible.builtin.copy:
-        dest: /etc/issue.net
-        content: "\n"
+        remote_src: true
         owner: root
         group: root
         mode: '0644'
       ignore_errors: true
 
-    - name: Remove timed cron entry
+    - name: Restore original /etc/issue.net
+      ansible.builtin.copy:
+        src: /usr/local/lib/labreserve/original_issue.net
+        dest: /etc/issue.net
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      ignore_errors: true
+
+    - name: Remove cron entries (current OS)
       ansible.builtin.file:
-        path: /etc/cron.d/labreserve-timed
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cron.d/labreserve-timed
+        - /etc/cron.d/labreserve-reboot
+
+    - name: Remove cancel script (current OS)
+      ansible.builtin.file:
+        path: /root/cancel_reservation
         state: absent
 
-    - name: Remove reboot cron entry
+    - name: Remove labreserve lib directory (current OS)
       ansible.builtin.file:
-        path: /etc/cron.d/labreserve-reboot
+        path: /usr/local/lib/labreserve
         state: absent
 
-    - name: Remove revert script
+    # ── alternate OS roots restore ───────────────────────────────────────────
+
+    - name: Read original hash from each alternate root's revert script
+      ansible.builtin.shell: |
+        grep "^ORIGINAL_HASH=" {{ item }}/usr/local/lib/labreserve/revert.sh \
+          | sed "s/^ORIGINAL_HASH='//;s/'$//"
+      loop: "{{ alt_roots | default([]) }}"
+      register: _alt_original_hashes
+      changed_when: false
+      no_log: true
+      ignore_errors: true
+
+    - name: Build alternate root release info
+      ansible.builtin.set_fact:
+        _alt_release_info: >-
+          {%- set result = [] -%}
+          {%- for i in range(alt_roots | default([]) | length) -%}
+            {%- set r = _alt_original_hashes.results[i] -%}
+            {%- if not r.failed | default(false) -%}
+              {%- set _ = result.append({'root': alt_roots[i], 'original_hash': r.stdout}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ result }}
+
+    - name: Restore original password hash in alternate root shadow files
+      ansible.builtin.shell: |
+        python3 -c "
+        import os
+        path  = os.environ['SHADOW_PATH']
+        user  = os.environ['SHADOW_USER']
+        ohash = os.environ['ORIG_HASH']
+        with open(path) as f:
+            lines = f.readlines()
+        with open(path, 'w') as f:
+            for line in lines:
+                if line.startswith(user + ':'):
+                    parts = line.split(':')
+                    parts[1] = ohash
+                    line = ':'.join(parts)
+                f.write(line)
+        "
+      environment:
+        SHADOW_PATH: "{{ item.root }}/etc/shadow"
+        SHADOW_USER: "{{ ansible_user }}"
+        ORIG_HASH: "{{ item.original_hash }}"
+      loop: "{{ _alt_release_info }}"
+      no_log: true
+
+    - name: Restore original /etc/motd in alternate roots
+      ansible.builtin.copy:
+        src: "{{ item }}/usr/local/lib/labreserve/original_motd"
+        dest: "{{ item }}/etc/motd"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ alt_roots_unique_motd | default([]) }}"
+      ignore_errors: true
+
+    - name: Restore original /etc/issue.net in alternate roots
+      ansible.builtin.copy:
+        src: "{{ item }}/usr/local/lib/labreserve/original_issue.net"
+        dest: "{{ item }}/etc/issue.net"
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ alt_roots_unique_motd | default([]) }}"
+      ignore_errors: true
+
+    - name: Remove cron entries from alternate roots
       ansible.builtin.file:
-        path: /usr/local/lib/labreserve/revert.sh
+        path: "{{ item[0] }}/etc/cron.d/{{ item[1] }}"
         state: absent
+      loop: "{{ alt_roots | default([]) | product(['labreserve-timed', 'labreserve-reboot']) | list }}"
+
+    - name: Remove cancel script from alternate roots
+      ansible.builtin.file:
+        path: "{{ item }}/root/cancel_reservation"
+        state: absent
+      loop: "{{ alt_roots | default([]) }}"
+
+    - name: Remove labreserve lib directory from alternate roots
+      ansible.builtin.file:
+        path: "{{ item }}/usr/local/lib/labreserve"
+        state: absent
+      loop: "{{ alt_roots | default([]) }}"

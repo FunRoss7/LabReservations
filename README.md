@@ -248,6 +248,61 @@ Release all active reservations first, then run `passwd`.
 |----------|---------|-------------|
 | `LABRESERVE_HOME` | `/etc/labreserve` | Override system config directory |
 | `LABRESERVE_INVENTORY` | `$LABRESERVE_HOME/hosts.yml` | Override ansible inventory path |
+| `LABRESERVE_JUMP_BOX` | _(unset)_ | Hostname or IP of this jump box. When set, the cancel script dropped on target machines will SSH back here to update the reservation database immediately on cancellation. Requires a `labreserve-agent` user on the jump box with a forced-command authorized key (see below). |
+
+---
+
+## Dual-boot machines
+
+`labreserve` automatically handles machines with multiple bootable OS
+installations (e.g. two leap-frogging software stacks on the same hardware).
+
+At reservation time, the playbook inspects the running system's mount table and
+identifies alternate OS roots — top-level mount points (e.g. `/mnt/op2`) that
+contain their own `/etc/shadow` on a separate physical partition.  For each
+discovered root it:
+
+- applies the reservation password hash directly to that root's `/etc/shadow`
+- writes the reservation banner to that root's `/etc/motd` and `/etc/issue.net`
+  (skipped if the file lives on a partition already handled by another root —
+  this covers diamond-mounted shared partitions such as a common `/opt`)
+- stores the original motd/issue.net content and installs a self-contained
+  revert script + cron entries inside that root's own filesystem
+
+When the machine boots into an alternate OS, that OS's cron-on-boot entry fires
+the revert script, which restores the original password hash and banners for
+that OS.  No cross-OS coordination is required.
+
+No inventory changes are needed.  The playbooks discover alternate roots
+dynamically and apply the same process generically to however many are present.
+
+### Cancel script and remote DB update (optional)
+
+A `cancel_reservation` script is placed in `/root/` on every OS root.  Anyone
+with root access to the physical machine can run it to immediately release the
+reservation without waiting for expiry.
+
+The cancel script will attempt to SSH back to the jump box to update the
+reservation database if `LABRESERVE_JUMP_BOX` is set.  To enable this, create
+a dedicated user on the jump box and restrict it to the single sqlite3 command:
+
+```bash
+# On the jump box — one-time admin setup
+sudo useradd -r -s /usr/sbin/nologin labreserve-agent
+sudo mkdir -p /home/labreserve-agent/.ssh
+# Generate or supply a key pair; put the private key on target machines as
+# /root/.ssh/labreserve_agent (chmod 600, owned by root).
+# Add the public key with a forced command:
+echo 'command="sqlite3 /etc/labreserve/reservations.db",no-pty,no-port-forwarding <pubkey>' \
+    | sudo tee /home/labreserve-agent/.ssh/authorized_keys
+sudo chmod 700 /home/labreserve-agent/.ssh
+sudo chmod 600 /home/labreserve-agent/.ssh/authorized_keys
+sudo chown -R labreserve-agent: /home/labreserve-agent/.ssh
+```
+
+If the SSH key is not present or the connection fails, the cancel script falls
+back gracefully: it still completes the local revert and prints instructions for
+running `labreserve release` on the jump box manually.
 
 ---
 
@@ -262,8 +317,13 @@ Release all active reservations first, then run `passwd`.
 ~/.labreserve/profile.key                 per-user AES key (chmod 600)
 ~/.labreserve/profile.enc                 per-user encrypted reservation password (chmod 600)
 
-# Installed on target machines during reservation (removed on release/expiry):
+# Installed on each OS root of target machines during reservation (removed on release/expiry).
+# On single-boot machines this is just /; on dual-boot machines these appear
+# under each discovered alternate root (e.g. /mnt/op2/usr/local/lib/...) as well.
 /usr/local/lib/labreserve/revert.sh       self-contained revert script
+/usr/local/lib/labreserve/original_motd   original /etc/motd saved at reservation time
+/usr/local/lib/labreserve/original_issue.net  original /etc/issue.net saved at reservation time
 /etc/cron.d/labreserve-timed              fires at expiry time
 /etc/cron.d/labreserve-reboot             fires on boot, no-ops until expiry
+/root/cancel_reservation                  emergency cancel script (run as root on target)
 ```
