@@ -48,8 +48,3 @@
     mode: '0644'
   loop: "{{ alt_roots_unique_motd | default([]) }}"
 
-handlers:
-  - name: Reload sshd
-    ansible.builtin.service:
-      name: sshd
-      state: reloaded

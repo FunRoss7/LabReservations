@@ -1,24 +1,30 @@
 VERSION := 0.1.0
 RELEASE := 1
-RPM_FILE := labreserve-$(VERSION)-$(RELEASE).el9.noarch.rpm
-RPM      := test/$(RPM_FILE)
 
-.PHONY: all rpm test clean
+RPM_EL8 := test/labreserve-$(VERSION)-$(RELEASE).el8.noarch.rpm
+RPM_EL9 := test/labreserve-$(VERSION)-$(RELEASE).el9.noarch.rpm
+
+.PHONY: all rpm rpm-el8 rpm-el9 test test-el8 test-el9 clean
 
 all: rpm test
 
-# Build the RPM inside a throwaway Rocky Linux 9 container so the host
-# needs no rpm-build toolchain.  Source files are mounted read-only; the
-# finished RPM lands in test/ where Dockerfile.jumpbox can COPY it.
-rpm: $(RPM)
+rpm: rpm-el8 rpm-el9
 
-$(RPM):
-	@echo "==> Building RPM in Rocky Linux 9 container"
+test: test-el8 test-el9
+
+# ── RPM builds ────────────────────────────────────────────────────────────────
+# RPM targets are phony so they always clean and rebuild — no stale packages.
+# Each build runs inside a throwaway container matching the target EL version
+# so the host needs no rpm-build toolchain.
+
+define build_rpm
+	@echo "==> Building EL$(1) RPM in rockylinux:$(1) container"
 	@mkdir -p test
+	@rm -f test/labreserve-$(VERSION)-$(RELEASE).el$(1).noarch.rpm
 	docker run --rm \
 		-v "$(CURDIR):/src:ro" \
 		-v "$(CURDIR)/test:/out" \
-		rockylinux:9 bash -c '\
+		rockylinux:$(1) bash -c '\
 		    set -euo pipefail && \
 		    dnf install -y rpm-build > /dev/null && \
 		    mkdir -p ~/rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS} && \
@@ -29,13 +35,31 @@ $(RPM):
 		        -C /tmp labreserve-$(VERSION) && \
 		    cp /src/labreserve.spec ~/rpmbuild/SPECS/ && \
 		    rpmbuild -bb ~/rpmbuild/SPECS/labreserve.spec 2>&1 && \
-		    cp ~/rpmbuild/RPMS/noarch/$(RPM_FILE) /out/'
-	@echo "==> RPM written to $(RPM)"
+		    cp ~/rpmbuild/RPMS/noarch/labreserve-$(VERSION)-$(RELEASE).el$(1).noarch.rpm /out/'
+	@echo "==> RPM written to test/labreserve-$(VERSION)-$(RELEASE).el$(1).noarch.rpm"
+endef
 
-# Run the container test suite.  Requires the RPM to have been built first.
-test: $(RPM)
-	@echo "==> Running container tests"
-	bash test/run_tests.sh
+rpm-el8:
+	$(call build_rpm,8)
+
+rpm-el9:
+	$(call build_rpm,9)
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+# Each test target rebuilds its RPM first so the installed package is always
+# current.
+
+test-el8: rpm-el8
+	@echo "==> Running EL8 container tests"
+	EL_VERSION=8 RPM_FILE=labreserve-$(VERSION)-$(RELEASE).el8.noarch.rpm \
+	    bash test/run_tests.sh
+
+test-el9: rpm-el9
+	@echo "==> Running EL9 container tests"
+	EL_VERSION=9 RPM_FILE=labreserve-$(VERSION)-$(RELEASE).el9.noarch.rpm \
+	    bash test/run_tests.sh
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
 
 clean:
 	rm -f test/labreserve-*.rpm

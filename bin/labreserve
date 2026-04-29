@@ -111,6 +111,7 @@ init_db() {
 
 _expire_stale() {
     [[ -f "$DB_PATH" ]] || return 0
+    init_db
     local now
     now=$(date +%Y-%m-%dT%H:%M:%S)
     _db "UPDATE reservations SET status='expired'
