@@ -1,0 +1,34 @@
+ARG ROCKY_VERSION=9
+FROM rockylinux:${ROCKY_VERSION}
+
+RUN dnf install -y \
+        openssh-server \
+        shadow-utils \
+        cronie \
+        python3 \
+        sudo \
+        iproute \
+    && dnf clean all \
+    # Generate host keys
+    && ssh-keygen -A \
+    # Create shared lab account with a known initial password
+    && useradd -m labuser \
+    && echo 'labuser:LabDefault123!' | chpasswd \
+    # Grant passwordless sudo (ansible needs root to modify /etc/shadow etc.)
+    && echo 'labuser ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/labuser \
+    && chmod 440 /etc/sudoers.d/labuser \
+    # Set up .ssh directory for key-based ansible auth
+    && mkdir -p /home/labuser/.ssh \
+    && chmod 700 /home/labuser/.ssh \
+    && chown -R labuser:labuser /home/labuser/.ssh
+
+# Enable both key and password auth.
+# Password auth is used by sshpass in the test suite to verify that the
+# reservation password change actually took effect.
+RUN mkdir -p /etc/ssh/sshd_config.d \
+    && printf 'PubkeyAuthentication yes\nPasswordAuthentication yes\n' \
+        > /etc/ssh/sshd_config.d/01-labreserve-test.conf
+
+EXPOSE 22
+# Remove nologin (EL8 containers leave it in place without systemd) then start sshd
+CMD ["/bin/bash", "-c", "rm -f /run/nologin /etc/nologin && exec /usr/sbin/sshd -D -e"]

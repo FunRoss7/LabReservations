@@ -1,0 +1,51 @@
+---
+# Build args are supplied by run_tests.sh via environment variables:
+#   ROCKY_VERSION  — 8 or 9 (default: 9)
+#   RPM_FILE       — filename of the pre-built RPM in test/ (default: el9)
+#
+# The compose project name (set by run_tests.sh via -p) includes the EL version
+# so el8 and el9 test environments can exist simultaneously without conflicts.
+# Container names are therefore left unset and scoped by the project name.
+
+services:
+  lab01:
+    build:
+      context: .
+      dockerfile: Dockerfile.target
+      args:
+        ROCKY_VERSION: ${ROCKY_VERSION:-9}
+    hostname: lab01
+    networks:
+      - labnet
+
+  lab02:
+    build:
+      context: .
+      dockerfile: Dockerfile.target
+      args:
+        ROCKY_VERSION: ${ROCKY_VERSION:-9}
+    hostname: lab02
+    networks:
+      - labnet
+
+  jumpbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.jumpbox
+      args:
+        ROCKY_VERSION: ${ROCKY_VERSION:-9}
+        RPM_FILE: ${RPM_FILE:-labreserve-0.1.0-1.el9.noarch.rpm}
+    hostname: jumpbox
+    networks:
+      - labnet
+    # The generated SSH key pair is mounted so ansible can authenticate to
+    # targets without a password.
+    volumes:
+      - ./ssh:/root/.ssh:ro
+    depends_on:
+      - lab01
+      - lab02
+
+networks:
+  labnet:
+    driver: bridge

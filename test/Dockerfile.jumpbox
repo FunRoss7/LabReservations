@@ -1,0 +1,31 @@
+ARG ROCKY_VERSION=9
+FROM rockylinux:${ROCKY_VERSION}
+
+# Re-declare ARGs after FROM so they are available in subsequent instructions.
+ARG ROCKY_VERSION=9
+ARG RPM_FILE=labreserve-0.1.0-1.el9.noarch.rpm
+
+# EPEL is needed on both EL8 and EL9 for sshpass.
+# On EL8 it also ensures ansible-core is reachable if AppStream alone isn't
+# sufficient on older minor versions.
+RUN dnf install -y epel-release \
+    && dnf install -y \
+        ansible-core \
+        openssl \
+        sqlite \
+        openssh-clients \
+        sshpass \
+    && dnf clean all
+
+# Install labreserve from the locally-built RPM.  Dependencies were satisfied
+# above so localinstall only needs to lay down the package itself.
+COPY ${RPM_FILE} /tmp/
+RUN dnf localinstall -y /tmp/${RPM_FILE} \
+    && rm /tmp/${RPM_FILE}
+
+RUN chmod 775 /etc/labreserve
+
+ENV LABRESERVE_HOME=/etc/labreserve
+
+# Keep the container alive so the test script can docker compose exec into it.
+CMD ["sleep", "infinity"]
