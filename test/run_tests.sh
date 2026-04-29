@@ -131,6 +131,13 @@ jexec "
 "
 echo "  Reservation profile created (password: $RESERVATION_PASSWORD)"
 
+# ── Test: initial status (empty DB) ──────────────────────────────────────────
+section "Status: no reservations"
+INIT_STATUS=$(jexec "labreserve status")
+echo "$INIT_STATUS" | grep -q "No reservations found" \
+    && pass "Status shows 'No reservations found' with empty DB" \
+    || fail "Expected 'No reservations found', got: $INIT_STATUS"
+
 # ── Test: reserve lab01 ───────────────────────────────────────────────────────
 section "Reserve lab01 --duration 2h"
 HASH_BEFORE=$(texec lab01 "getent shadow labuser | cut -d: -f2")
@@ -202,6 +209,9 @@ echo "$STATUS" | grep -q "lab01" \
 echo "$STATUS" | grep -q "ACTIVE" \
     && pass "Status shows ACTIVE" \
     || fail "Status does not show ACTIVE"
+echo "$STATUS" | grep -q "lab02" \
+    && fail "lab02 should not appear in status before it is reserved" \
+    || pass "lab02 correctly absent from status before reservation"
 
 # ── Test: conflict detection ──────────────────────────────────────────────────
 section "Conflict detection"
@@ -220,6 +230,13 @@ STATUS2=$(jexec "labreserve status")
 echo "$STATUS2" | grep -q "lab02" \
     && pass "lab02 appears in status after reservation" \
     || fail "lab02 missing from status"
+echo "$STATUS2" | grep -q "lab01" \
+    && pass "lab01 still ACTIVE while lab02 is also reserved" \
+    || fail "lab01 missing from status while lab02 is active"
+COUNT_ACTIVE=$(echo "$STATUS2" | grep -c "ACTIVE" || true)
+[[ "$COUNT_ACTIVE" -eq 2 ]] \
+    && pass "Both machines show ACTIVE (count=$COUNT_ACTIVE)" \
+    || fail "Expected 2 ACTIVE machines, got $COUNT_ACTIVE"
 
 # ── Test: cancel script (local revert) ───────────────────────────────────────
 section "Cancel script on lab02"
@@ -243,6 +260,18 @@ texec lab02 "test ! -f /etc/cron.d/labreserve-timed" \
 texec lab02 "! grep -q 'MACHINE RESERVED' /etc/motd 2>/dev/null" \
     && pass "MOTD restored after cancel" \
     || fail "MOTD still shows reservation banner after cancel"
+
+# ── Test: status after local cancel (no jumpbox callback) ────────────────────
+section "Status after cancel (no jumpbox callback)"
+# JUMP_BOX is not configured in this test env, so the cancel script cannot SSH
+# back to update the DB — lab02 remains ACTIVE in the jumpbox's view.
+STATUS_AFTER_CANCEL=$(jexec "labreserve status")
+echo "$STATUS_AFTER_CANCEL" | grep -q "lab01" \
+    && pass "lab01 still ACTIVE after lab02 local cancel" \
+    || fail "lab01 missing from status after lab02 cancel"
+echo "$STATUS_AFTER_CANCEL" | grep -q "lab02" \
+    && pass "lab02 still shown ACTIVE (local cancel does not update jumpbox DB)" \
+    || fail "lab02 unexpectedly absent from status after local cancel"
 
 # ── Test: release lab01 ───────────────────────────────────────────────────────
 section "Release lab01"
@@ -284,6 +313,28 @@ $COMPOSE exec -T jumpbox \
         labuser@lab01 'echo ok' > /dev/null 2>&1 \
     && fail "Reservation password still works after release (should be rejected)" \
     || pass "Reservation password correctly rejected after release"
+
+# ── Test: status after release ───────────────────────────────────────────────
+section "Status after release"
+STATUS_AFTER_RELEASE=$(jexec "labreserve status")
+echo "$STATUS_AFTER_RELEASE" | grep -q "lab01" \
+    && fail "lab01 should not appear in active status after release" \
+    || pass "lab01 absent from active status after release"
+echo "$STATUS_AFTER_RELEASE" | grep -q "lab02" \
+    && pass "lab02 still ACTIVE after lab01 release" \
+    || fail "lab02 missing from active status after lab01 release"
+
+# status --all should include the historical released entry
+STATUS_ALL=$(jexec "labreserve status --all")
+echo "$STATUS_ALL" | grep -q "lab01" \
+    && pass "lab01 appears in 'status --all' history" \
+    || fail "lab01 missing from 'status --all' history"
+echo "$STATUS_ALL" | grep -qi "RELEASED" \
+    && pass "'status --all' shows RELEASED entry for lab01" \
+    || fail "RELEASED status not found in 'status --all'"
+echo "$STATUS_ALL" | grep -q "lab02" \
+    && pass "lab02 appears in 'status --all'" \
+    || fail "lab02 missing from 'status --all'"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 section "Results"
